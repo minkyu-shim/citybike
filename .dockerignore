@@ -1,0 +1,20 @@
+# dependencies & build output are recreated inside the image
+node_modules
+dist
+npm-debug.log*
+
+# VCS, secrets, docs, local tooling
+.git
+.gitignore
+.github
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+REPORT.md
+README.md
+.vscode
+.idea
+.DS_Store
+*.swp
