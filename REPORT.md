@@ -87,3 +87,44 @@ $ curl localhost:4173/health
 **B)** That's all the server uses at runtime: it serves `public/` and checks that the manifest file exists. `hasBuildManifest` is still true because the manifest was generated in the build stage and copied over.
 
 **C)** Security: far fewer packages and tools in the image that could have vulnerabilities, and it doesn't run as root. Ops: the image is 10x smaller, so pulls, deploys and rollbacks are faster.
+
+## Mission 4 - Five gates
+
+I did both paths: `scripts/pipeline.sh` (local) and `.github/workflows/sdlc.yml` (GitHub Actions). Each gate starts the container, polls `/health` for up to 30 s (and fails straight away if the container exits), runs the test script and removes the container. Gates use port 4174; prod runs as `citybike-prod` on 4173 and stays up.
+
+Local run on v1 (`./scripts/pipeline.sh citybike:v1`):
+```
+===== GATE: staging (citybike:v1) =====
+Health payload: {"ok":true,"environment":"staging","hasBuildManifest":true,"secureKeyConfigured":false}
+[STAGING] PASSED.
+===== GATE: uat (citybike:v1) =====
+[UAT] PASSED.
+===== GATE: oat (citybike:v1) =====
+[OAT] PASSED.
+===== GATE: preprod (citybike:v1) =====
+[PRE-PROD] PASSED.
+===== GATE: prod (citybike:v1) =====
+[PROD] Production verification PASSED.
+===== ALL 5 GATES PASSED: citybike:v1 is live as citybike-prod on :4173 =====
+
+$ curl localhost:4173/health
+{"ok":true,"environment":"production","hasBuildManifest":true,"secureKeyConfigured":true}
+```
+
+GitHub Actions run: TODO (PR link + screenshot)
+
+**A)** Each gate builds on the one before it. There's no point load-testing something that doesn't even start. Stopping at the first failure means a broken build never reaches prod.
+
+**B)**
+- Staging: the app starts and the API works.
+- UAT: the business rules are correct (stations, valid and invalid reservations).
+- OAT: it holds up operationally (bad input, large payloads, bursts of requests).
+- Preprod: the image itself (size, no devDependencies) plus the real prod config.
+- Prod: the deployed instance really uses production settings and the real key.
+
+**C)** If you rebuild for each environment, you aren't testing the thing you ship: the dependencies or the base image could change between builds. Building once means the exact image that passed the tests is the one that goes to prod.
+
+**D)** `server.js` falls back to `DEV_LOCAL_INSECURE_KEY` when `PROD_API_KEY` isn't set, so the app starts and looks healthy even with no key. Only preprod and prod check `secureKeyConfigured`. Without the key, the prod gate fails:
+```
+FAIL: Production container is still using the insecure fallback key! Inject PROD_API_KEY from GitHub Secrets.
+```
