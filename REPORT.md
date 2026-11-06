@@ -111,7 +111,16 @@ $ curl localhost:4173/health
 {"ok":true,"environment":"production","hasBuildManifest":true,"secureKeyConfigured":true}
 ```
 
-GitHub Actions run: TODO (PR link + screenshot)
+GitHub Actions on PR #1 (https://github.com/minkyu-shim/citybike/pull/1), all green:
+```
+build    pass  36s
+staging  pass  11s
+uat      pass  14s
+oat      pass  13s
+preprod  pass  14s
+prod     pass  14s
+```
+Run: https://github.com/minkyu-shim/citybike/actions/runs/42206091330
 
 **A)** Each gate builds on the one before it. There's no point load-testing something that doesn't even start. Stopping at the first failure means a broken build never reaches prod.
 
@@ -128,3 +137,100 @@ GitHub Actions run: TODO (PR link + screenshot)
 ```
 FAIL: Production container is still using the insecure fallback key! Inject PROD_API_KEY from GitHub Secrets.
 ```
+
+## Mission 5 - Bad push vs. gate
+
+### Part 1: straight to prod, no gate
+
+v2 adds `new URL(process.env.DB_URL).hostname` at startup. On my machine with `DB_URL` set it's fine:
+```
+db host: localhost
+CityBike service listening on http://0.0.0.0:4180 [env=development]
+```
+
+Built `citybike:v2` and replaced prod with it (no `DB_URL`):
+```
+$ docker ps -a
+CONTAINER ID   IMAGE         STATUS                     NAMES
+13e09c180f31   citybike:v2   Exited (1) 2 seconds ago   citybike-prod
+
+$ curl localhost:4173/health
+curl: (7) Failed to connect to localhost port 4173 after 1 ms: Couldn't connect to server
+
+$ docker logs citybike-prod
+TypeError: Invalid URL
+    at new URL (node:internal/url:806:29)
+    at Object.<anonymous> (/app/server.js:12:16)
+  code: 'ERR_INVALID_URL',
+  input: 'undefined'
+```
+Root cause: `DB_URL` isn't set in prod, so `new URL(undefined)` throws at startup and the container exits.
+
+**Decision: rollback.** Prod is completely down and v1 is a known good image that's already built and tested, so going back to it takes a few seconds. A fix forward would mean writing code, building and testing under pressure while users can't use the app. Roll back first, then fix v2 properly and send it through the pipeline.
+
+Rollback:
+```
+$ docker rm -f citybike-prod
+$ docker run -d --name citybike-prod -p 4173:4173 -e APP_ENV=production -e PROD_API_KEY=lab-secret citybike:v1
+$ curl localhost:4173/health
+{"ok":true,"environment":"production","hasBuildManifest":true,"secureKeyConfigured":true}
+```
+
+### Part 2: with the gate
+
+Local pipeline (`./scripts/pipeline.sh citybike:v2`) stops at the first gate:
+```
+===== GATE: staging (citybike:v2) =====
+FAIL: container citybike-gate exited during startup. Logs:
+TypeError: Invalid URL
+    at Object.<anonymous> (/app/server.js:12:16)
+  code: 'ERR_INVALID_URL',
+  input: 'undefined'
+pipeline exit: 1
+```
+Prod was never touched; `citybike-prod` (v1) stayed up on 4173 the whole time:
+```
+9ea9b16718af   citybike:v1   Up 5 seconds   0.0.0.0:4173->4173/tcp   citybike-prod
+```
+
+GitHub Actions on PR #2 (https://github.com/minkyu-shim/citybike/pull/2): build passes, staging fails, everything after it is skipped, so v2 never reaches prod.
+```
+build    pass      38s
+staging  fail      42s
+uat      skipping
+oat      skipping
+preprod  skipping
+prod     skipping
+```
+Staging log:
+```
+Container never became healthy
+TypeError: Invalid URL
+    at Object.<anonymous> (/app/server.js:12:16)
+  code: 'ERR_INVALID_URL',
+  input: 'undefined'
+##[error]Process completed with exit code 1.
+```
+Run: https://github.com/minkyu-shim/citybike/actions/runs/42206602486
+
+## Mission 6 - Wrap-up
+
+**What should happen when a gate is red?** The pipeline stops and nothing gets promoted. Prod keeps running the last good version. Someone looks at the logs, fixes the problem in a new commit, and the whole pipeline runs again from the start. You don't skip or re-run just the failing gate until it passes.
+
+**Why practise the rollback before you need it?** During an outage you're stressed and short on time. If you've already done the rollback, you know the commands, you know the old image is still available, and you know it actually works. Finding out during an incident that the rollback doesn't work makes the outage much longer.
+
+Git history (`git log --oneline --graph --all`):
+```
+* 9343b69 v2: log the db host
+*   645e020 Merge pull request #1 from minkyu-shim/chore/readme
+|\
+| * c8ffdae docs: trigger pipeline
+|/
+* 6b66643 ci: 5-gate pipeline (local + GitHub Actions)
+* a451714 Dockerfile: cache + multi-stage
+* 9318f2a v1: station snapshot
+* fa95935 docs; update README
+...
+* b912e96 initial commit
+```
+PRs: #1 (v1, green) https://github.com/minkyu-shim/citybike/pull/1, #2 (v2, blocked at staging) https://github.com/minkyu-shim/citybike/pull/2
