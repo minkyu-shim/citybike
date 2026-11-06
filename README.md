@@ -54,3 +54,4 @@ Students introduce a breaking code change (`v2` missing `DB_URL`), manually depl
 ### Mission 6: Deliverables & Exit Ticket
 
 Students compile terminal outputs, image size/time metrics, CI/CD pipeline execution evidence, and answer technical reflection questions.
+
